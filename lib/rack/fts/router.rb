@@ -74,17 +74,51 @@ module Rack
       def handle_unrouted_request(env, original_error)
         request = Rack::Request.new(env)
 
-        # Find first matching handler from configured route_handlers
-        handler_class = config.route_handlers.find do |klass|
-          klass.new.matches?(request)
-        end
+        # Find first matching handler (including nested routes)
+        handler = find_matching_handler(request)
 
-        if handler_class
-          handler_class.new.call(env)
+        if handler
+          handler.call(env)
         else
           # No handler found - return 404
           not_found_response(request, original_error)
         end
+      end
+
+      # Find a handler that matches the request
+      # Checks both direct plugin matches and nested/mounted plugins
+      # @param request [Rack::Request] The request
+      # @return [RouteBase, NestedRoute, nil] The matching handler or nil
+      def find_matching_handler(request)
+        config.route_handlers.each do |handler_class|
+          instance = handler_class.new
+
+          # Check direct match (includes enabled? check via matches?)
+          return instance if instance.matches?(request)
+
+          # Check mounted sub-plugins (Use Case 5)
+          nested = find_nested_match(handler_class, request)
+          return nested if nested
+        end
+        nil
+      end
+
+      # Find a matching nested route within a parent plugin
+      # @param parent_class [Class] The parent plugin class
+      # @param request [Rack::Request] The request
+      # @return [NestedRoute, nil] The matching nested route or nil
+      def find_nested_match(parent_class, request)
+        return nil unless parent_class.respond_to?(:mounted_plugins)
+
+        parent_class.mounted_plugins.each do |mount_config|
+          nested = NestedRoute.new(
+            parent: parent_class,
+            child: mount_config[:class],
+            mount_path: mount_config[:path]
+          )
+          return nested if nested.matches?(request)
+        end
+        nil
       end
 
       # Generate 404 Not Found response

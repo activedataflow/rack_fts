@@ -15,7 +15,11 @@ module Rack
                     :post_rails_stages,
                     :route_handlers,
                     :error_handler,
-                    :logger
+                    :logger,
+                    # Use Case 5: Plugin discovery settings
+                    :plugin_directories,
+                    :auto_discover,
+                    :version_check_mode
 
       def initialize
         @authenticate_stage = Stages::Authenticate
@@ -27,6 +31,10 @@ module Rack
         @route_handlers = []
         @error_handler = nil
         @logger = nil
+        # Use Case 5: Plugin discovery defaults
+        @plugin_directories = []
+        @auto_discover = true
+        @version_check_mode = :warn # :strict, :warn, :ignore
       end
       
       def configure
@@ -47,6 +55,10 @@ module Rack
         copy.instance_variable_set(:@route_handlers, @route_handlers.dup)
         copy.instance_variable_set(:@error_handler, @error_handler)
         copy.instance_variable_set(:@logger, @logger)
+        # Use Case 5: Plugin discovery settings
+        copy.instance_variable_set(:@plugin_directories, @plugin_directories.dup)
+        copy.instance_variable_set(:@auto_discover, @auto_discover)
+        copy.instance_variable_set(:@version_check_mode, @version_check_mode)
         copy
       end
     end

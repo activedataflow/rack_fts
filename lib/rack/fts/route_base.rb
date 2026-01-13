@@ -78,6 +78,120 @@ module Rack
           end
           { controller: @rails_controller, action: @rails_action }
         end
+
+        # ============================================
+        # Use Case 5: Plugin Metadata DSL
+        # ============================================
+
+        # DSL: Define unique plugin identifier
+        # @param name [Symbol, String, nil] The plugin name
+        # @return [Symbol] The current plugin name
+        # @example
+        #   plugin_name :health_check
+        def plugin_name(name = nil)
+          @plugin_name = name.to_sym if name
+          @plugin_name || default_plugin_name
+        end
+
+        # DSL: Define plugin version
+        # @param version [String, nil] Semantic version string
+        # @return [String] The current plugin version
+        # @example
+        #   plugin_version "1.2.0"
+        def plugin_version(version = nil)
+          @plugin_version = version if version
+          @plugin_version || "0.0.0"
+        end
+
+        # DSL: Define rack-fts version requirement
+        # @param requirement [String, nil] RubyGems requirement string
+        # @return [String, nil] The version requirement
+        # @example
+        #   requires_rack_fts "~> 0.2.0"
+        #   requires_rack_fts ">= 0.1.0, < 1.0"
+        def requires_rack_fts(requirement = nil)
+          @rack_fts_version_requirement = requirement if requirement
+          @rack_fts_version_requirement
+        end
+
+        # Alias for requires_rack_fts
+        alias rack_fts_version_requirement requires_rack_fts
+
+        # DSL: Define plugin priority (higher = checked first)
+        # @param value [Integer, nil] Priority value
+        # @return [Integer] The current priority
+        # @example
+        #   priority 100
+        def priority(value = nil)
+          @priority = value if value
+          @priority || 0
+        end
+
+        # ============================================
+        # Use Case 5: Nesting DSL
+        # ============================================
+
+        # DSL: Mount a child plugin at a relative path
+        # @param child_class [Class] The plugin class to mount
+        # @param at [String] The relative path prefix
+        # @example
+        #   mount ApiV1Plugin, at: "/v1"
+        #   mount ApiV2Plugin, at: "/v2"
+        def mount(child_class, at:)
+          @mounted_plugins ||= []
+          @mounted_plugins << { class: child_class, path: at }
+        end
+
+        # Get all mounted sub-plugins
+        # @return [Array<Hash>] Array of {class:, path:} hashes
+        def mounted_plugins
+          @mounted_plugins || []
+        end
+
+        # DSL: Wrap child plugin stages with pre/post hooks
+        # @param stage [Symbol] The stage to wrap (:authenticate, :authorize, :action, :render)
+        # @param position [Symbol] When to run (:before or :after)
+        # @yield [context] Block to execute with the context
+        # @example
+        #   wrap_with stage: :authenticate, position: :before do |context|
+        #     context[:started_at] = Time.now
+        #     Success(context)
+        #   end
+        def wrap_with(stage:, position:, &block)
+          @stage_wrappers ||= {}
+          @stage_wrappers[stage] ||= { before: [], after: [] }
+          @stage_wrappers[stage][position] << block
+        end
+
+        # Get all stage wrappers
+        # @return [Hash] Stage wrappers configuration
+        def stage_wrappers
+          @stage_wrappers || {}
+        end
+
+        # ============================================
+        # Use Case 5: ENV Configuration
+        # ============================================
+
+        # Get the ENV configuration helper for this plugin
+        # @return [PluginEnv] The ENV accessor instance
+        def env
+          @env ||= PluginEnv.new(plugin_name)
+        end
+
+        private
+
+        # Generate default plugin name from class name
+        # @return [Symbol] The default plugin name
+        def default_plugin_name
+          class_name = name || "anonymous"
+          # Simple demodulize and underscore without ActiveSupport
+          base_name = class_name.split("::").last || class_name
+          base_name.gsub(/([A-Z]+)([A-Z][a-z])/, '\1_\2')
+                   .gsub(/([a-z\d])([A-Z])/, '\1_\2')
+                   .downcase
+                   .to_sym
+        end
       end
 
       # Check if this handler matches the given request
@@ -85,8 +199,21 @@ module Rack
       # @param request [Rack::Request] The incoming request
       # @return [Boolean] true if this handler should process the request
       def matches?(request)
+        return false unless enabled?
         return false unless method_matches?(request)
         path_matches?(request)
+      end
+
+      # Check if this plugin is enabled via ENV configuration
+      # @return [Boolean] true if enabled (default: true)
+      def enabled?
+        self.class.env.enabled?
+      end
+
+      # Get the ENV configuration helper for this plugin instance
+      # @return [PluginEnv] The ENV accessor
+      def env
+        self.class.env
       end
 
       # Main entry point - chooses FTS or Rails mode

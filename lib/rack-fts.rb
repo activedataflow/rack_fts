@@ -20,8 +20,18 @@ require_relative "rack/fts/stages/action"
 require_relative "rack/fts/stages/render"
 require_relative "rack/fts/stages/no_op"
 
+# Use Case 5: Plugin discovery and versioning
+require_relative "rack/fts/plugin_env"
+require_relative "rack/fts/version_checker"
+require_relative "rack/fts/plugin_registry"
+require_relative "rack/fts/plugin_discovery"
+require_relative "rack/fts/nested_route"
+
 # Load example route handlers
 require_relative "rack/fts/routes/health_check"
+
+# Rails engine (conditionally loaded when Rails is present)
+require_relative "rack/fts/engine" if defined?(Rails::Engine)
 
 module Rack
   module FTS

@@ -311,6 +311,249 @@ config.route_handlers = [
 ]
 ```
 
+### Use Case 5: Rails Fallback Router Engine with Discoverable, Versionable, Nestable Plugins
+
+Extends Use Case 4 with automatic plugin discovery, version compatibility checking, nested plugin support, and environment-based configuration.
+
+#### Key Features
+
+- **Auto-Discovery**: Scans directories for `*_plugin.rb` files
+- **Version Compatibility**: Plugins declare required rack-fts version
+- **Nested Plugins**: Mount child plugins at relative paths with stage wrappers
+- **ENV Configuration**: Each plugin has dedicated `RACK_FTS_{NAME}_{SETTING}` variables
+
+#### Rails Engine Integration
+
+The engine automatically discovers and registers plugins during Rails initialization:
+
+```ruby
+# config/initializers/rack_fts.rb
+Rack::FTS.configure do |config|
+  config.plugin_directories = [
+    Rails.root.join("app/fts_plugins"),
+    Rails.root.join("lib/fts_plugins")
+  ]
+  config.auto_discover = true
+  config.version_check_mode = :warn  # :strict, :warn, :ignore
+end
+```
+
+#### Creating Plugins
+
+**Directory Structure:**
+```
+app/
+└── fts_plugins/
+    ├── health_plugin.rb
+    ├── api_docs_plugin.rb
+    └── metrics_plugin.rb
+```
+
+**Plugin DSL:**
+
+```ruby
+# app/fts_plugins/metrics_plugin.rb
+class MetricsPlugin < Rack::FTS::RouteBase
+  # Plugin metadata
+  plugin_name :metrics
+  plugin_version "1.2.0"
+  requires_rack_fts "~> 0.2.0"
+  priority 100  # Higher = checked first
+
+  # Route matching
+  route_pattern %r{^/metrics(/.*)?$}
+  http_methods :get
+
+  # Mount sub-plugins at relative paths
+  mount PrometheusPlugin, at: "/prometheus"
+  mount HealthPlugin, at: "/health"
+
+  # Wrap child plugin stages with before/after hooks
+  wrap_with stage: :authenticate, position: :before do |context|
+    context[:metrics_start] = Time.now
+    Success(context)
+  end
+
+  wrap_with stage: :render, position: :after do |context|
+    MetricsCollector.record(context[:metrics_start], Time.now)
+    Success(context)
+  end
+
+  class MetricsAction < Rack::FTS::Stages::Action
+    protected
+
+    def execute_action(request, identity, permissions)
+      format = env.get(:format, default: "json")
+      { metrics: collect_metrics, format: format }
+    end
+  end
+
+  protected
+
+  def authenticate_stage_class
+    Rack::FTS::Stages::NoOp
+  end
+
+  def authorize_stage_class
+    Rack::FTS::Stages::NoOp
+  end
+
+  def action_stage_class
+    MetricsAction
+  end
+end
+```
+
+#### Plugin DSL Reference
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `plugin_name` | Unique plugin identifier | `plugin_name :health_check` |
+| `plugin_version` | Plugin semantic version | `plugin_version "1.2.0"` |
+| `requires_rack_fts` | Version requirement | `requires_rack_fts "~> 0.2.0"` |
+| `priority` | Discovery/matching priority | `priority 100` |
+| `mount` | Mount child plugin at path | `mount ChildPlugin, at: "/sub"` |
+| `wrap_with` | Wrap child stages | `wrap_with stage: :auth, position: :before` |
+| `env` | Access plugin ENV config | `env.get(:timeout, default: "30")` |
+
+#### Environment Variables
+
+Each plugin has a dedicated ENV namespace:
+
+```bash
+RACK_FTS_{PLUGIN_NAME}_{SETTING}
+
+# Examples
+RACK_FTS_HEALTH_ENABLED=true
+RACK_FTS_HEALTH_DETAILED=false
+RACK_FTS_METRICS_FORMAT=prometheus
+RACK_FTS_METRICS_INTERVAL=60
+RACK_FTS_API_DOCS_VERSION=v2
+```
+
+**Reserved Variables:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RACK_FTS_{NAME}_ENABLED` | Enable/disable plugin | `true` |
+
+**Using ENV in Plugins:**
+
+```ruby
+class MyPlugin < Rack::FTS::RouteBase
+  plugin_name :my_plugin
+
+  def some_method
+    # Basic string access
+    timeout = env.get(:timeout, default: "30")
+
+    # Typed accessors
+    port = env.get_int(:port, default: 3000)
+    debug = env.get_bool(:debug, default: false)
+
+    # Check if enabled
+    return unless env.enabled?
+
+    # Get all plugin ENV vars as hash
+    all_settings = env.to_h
+  end
+end
+```
+
+#### Nested Plugin Routing
+
+Child plugins are mounted at relative paths:
+
+```ruby
+# Parent matches /api/*
+class ApiPlugin < Rack::FTS::RouteBase
+  route_pattern %r{^/api(/.*)?$}
+
+  mount ApiV1Plugin, at: "/v1"  # Handles /api/v1/*
+  mount ApiV2Plugin, at: "/v2"  # Handles /api/v2/*
+end
+
+# Child sees path with prefix stripped
+class ApiV1Plugin < Rack::FTS::RouteBase
+  route_pattern %r{^/users.*$}  # Matches /api/v1/users (sees /users)
+end
+```
+
+**Request Flow:**
+```
+GET /api/v1/users
+  ↓
+1. Router finds ApiPlugin matches /api/*
+2. ApiPlugin.mounted_plugins finds ApiV1Plugin at /v1
+3. Path stripped: /api/v1/users → /users
+4. Parent's before wrappers execute
+5. Child's pipeline executes
+6. Parent's after wrappers execute
+7. Response returned
+```
+
+#### Stage Wrappers
+
+Parent plugins can wrap child plugin stages:
+
+```ruby
+class SecureApiPlugin < Rack::FTS::RouteBase
+  route_pattern %r{^/secure}
+
+  # Run before child's authenticate stage
+  wrap_with stage: :authenticate, position: :before do |context|
+    if rate_limited?(context[:request])
+      Failure(error: "Rate limited", status: 429)
+    else
+      Success(context)
+    end
+  end
+
+  # Run after child's action stage
+  wrap_with stage: :action, position: :after do |context|
+    AuditLog.record(context)
+    Success(context)
+  end
+
+  mount PublicApiPlugin, at: "/public"
+  mount AdminApiPlugin, at: "/admin"
+end
+```
+
+#### Version Checking
+
+Plugins can declare compatibility requirements:
+
+```ruby
+class MyPlugin < Rack::FTS::RouteBase
+  requires_rack_fts "~> 0.2.0"  # Allows 0.2.x
+  # or
+  requires_rack_fts ">= 0.2.0, < 1.0"  # Range
+end
+```
+
+**Check Modes:**
+
+| Mode | Behavior |
+|------|----------|
+| `:strict` | Raises error, prevents boot |
+| `:warn` | Logs warning, continues |
+| `:ignore` | No checking |
+
+#### Plugin Registry
+
+Access registered plugins programmatically:
+
+```ruby
+registry = Rack::FTS::PluginRegistry.instance
+
+registry.all                   # All plugins
+registry.enabled_plugins       # Only enabled
+registry.by_priority           # Sorted by priority
+registry.find(:my_plugin)      # Find by name
+registry.registered?(:health)  # Check if exists
+```
+
 ## Custom Stages
 
 ### Creating Custom Stages
