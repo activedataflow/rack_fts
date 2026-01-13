@@ -7,7 +7,7 @@ A Ruby gem that implements a Functional Task Supervisor (FTS) pattern for Rack-b
 - **Type-safe error handling** with dry-monads Result types (Success/Failure)
 - **Multi-stage request pipeline** with explicit stage states
 - **Railway Oriented Programming** for clean error propagation
-- **Three deployment modes**: Standalone server, Rails engine, Rails middleware
+- **Four deployment modes**: Standalone server, Rails engine, Rails middleware, Rails fallback router
 - **Customizable stages** for authentication, authorization, action, and rendering
 - **Comprehensive testing** with RSpec and Cucumber
 
@@ -182,6 +182,135 @@ module MyApp
 end
 ```
 
+### Use Case 4: Rails Fallback Router
+
+Use Rack-fts as a fallback router that catches routes Rails doesn't recognize and delegates to custom FTS route handlers. This enables a plugin architecture for handling dynamic or legacy routes.
+
+**How it works:**
+1. Request comes in to Rails
+2. Rails attempts to route the request
+3. If Rails throws `ActionController::RoutingError`, the FTS Router catches it
+4. FTS Router iterates through registered handlers to find a match
+5. First matching handler processes the request (via FTS pipeline or Rails delegation)
+
+#### Creating Route Handlers
+
+**FTS Pipeline Mode** - Full authenticate → authorize → action → render pipeline:
+
+```ruby
+# app/fts_routes/api_docs_route.rb
+class ApiDocsRoute < Rack::FTS::RouteBase
+  route_pattern %r{^/api/docs(/.*)?$}
+  http_methods :get
+
+  class DocsAction < Rack::FTS::Stages::Action
+    protected
+
+    def execute_action(request, identity, permissions)
+      { docs: load_api_documentation, version: "1.0" }
+    end
+  end
+
+  protected
+
+  def action_stage_class
+    DocsAction
+  end
+end
+```
+
+**Rails Delegation Mode** - Delegate to existing Rails controllers:
+
+```ruby
+# app/fts_routes/legacy_api_route.rb
+class LegacyApiRoute < Rack::FTS::RouteBase
+  route_pattern %r{^/v1/legacy(/.*)?$}
+  http_methods :get, :post
+
+  # Delegate to existing Rails controller
+  delegate_to "LegacyApi", action: :handle
+end
+```
+
+**Public Routes (Skip Authentication)** - Use NoOp stage for public endpoints:
+
+```ruby
+# app/fts_routes/health_check_route.rb
+class HealthCheckRoute < Rack::FTS::RouteBase
+  route_pattern "/health"
+  http_methods :get
+
+  class HealthAction < Rack::FTS::Stages::Action
+    protected
+
+    def execute_action(request, identity, permissions)
+      { status: "healthy", timestamp: Time.now.iso8601 }
+    end
+  end
+
+  protected
+
+  # Skip authentication for health checks
+  def authenticate_stage_class
+    Rack::FTS::Stages::NoOp
+  end
+
+  def authorize_stage_class
+    Rack::FTS::Stages::NoOp
+  end
+
+  def action_stage_class
+    HealthAction
+  end
+end
+```
+
+#### Configuration
+
+**config/initializers/rack_fts.rb:**
+```ruby
+require 'rack-fts'
+
+Rack::FTS.configure do |config|
+  config.route_handlers = [
+    HealthCheckRoute,     # First priority (specific routes first)
+    ApiDocsRoute,
+    LegacyApiRoute,       # Last priority (catch-all patterns go last)
+  ]
+end
+```
+
+**config/application.rb:**
+```ruby
+module MyApp
+  class Application < Rails::Application
+    # Insert FTS Router to catch routing errors
+    config.middleware.insert_before ActionDispatch::ShowExceptions,
+                                    Rack::FTS::Router
+  end
+end
+```
+
+#### RouteBase DSL
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `route_pattern` | String or Regexp to match request path | `route_pattern %r{^/api/.*$}` |
+| `http_methods` | Allowed HTTP methods (symbols) | `http_methods :get, :post` |
+| `delegate_to` | Delegate to Rails controller | `delegate_to "MyController", action: :index` |
+
+#### Built-in Route Handler
+
+Rack-fts includes a health check route handler out of the box:
+
+```ruby
+# Add to your route_handlers
+config.route_handlers = [
+  Rack::FTS::Routes::HealthCheck,  # Responds to GET /health
+  # ... your other handlers
+]
+```
+
 ## Custom Stages
 
 ### Creating Custom Stages
@@ -309,11 +438,15 @@ end
 
 ```ruby
 Rack::FTS.configure do |config|
+  # Stage classes for the FTS pipeline
   config.authenticate_stage = CustomAuthenticateStage
   config.authorize_stage = CustomAuthorizeStage
   config.action_stage = CustomActionStage
   config.render_stage = CustomRenderStage
-  
+
+  # Route handlers for fallback router (Use Case 4)
+  config.route_handlers = [HealthCheckRoute, ApiDocsRoute]
+
   config.logger = Logger.new(STDOUT)
 end
 ```
@@ -404,6 +537,8 @@ The gem consists of the following main components:
 - **Task** - Orchestrates execution of multiple stages
 - **Application** - Standalone Rack application
 - **Middleware** - Rails middleware wrapper
+- **Router** - Fallback router middleware for catching Rails routing errors
+- **RouteBase** - Base class for custom route handlers (supports FTS pipeline and Rails delegation)
 - **Configuration** - Configuration management
 
 See `rack_fts_class_diagram.png` for the complete class diagram.
